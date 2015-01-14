@@ -1,0 +1,275 @@
+%let wrds = wrds.wharton.upenn.edu 4016;options comamid = TCP remote=WRDS;
+signon username=_prompt_;
+
+/* execute code remotely within rsubmit-endrsubmit code block 
+   note that after 15 or so minutes of inactivity, you need to sign on again
+*/
+rsubmit;
+data myTable (keep = gvkey fyear SICH datadate sale at ni prcc_f csho);
+set comp.funda;
+/* require fyear to be within 2000-2013 */
+if 2000 <=fyear <= 2013;
+/* prevent double records */
+if indfmt='INDL' and datafmt='STD' and popsrc='D' and consol='C' ;
+run;
+proc download data=myTable out=myCompTable;run;
+endrsubmit;
+
+
+
+/* Question 1 : Check if there is any duplicate on the compustat fundamentals database
+		1. use dupout
+			a by 2 var
+			b by 1 var
+		2. use proc means
+*/
+/* 1 a*/
+proc sort data=myCompTable out=MyCompTableNoDup nodupkey dupout=dupgvyear; by gvkey fyear;
+run;
+/* 1 b*/
+
+data myCompTable;
+set myCompTable;
+gv_year= gvkey || fyear;
+run;
+proc sort data=myCompTable out=MyCompTableNoDup nodupkey dupout=dupgvyear; by gv_year; run;
+ 
+/* 2 */
+data myCompTable;
+set myCompTable;
+gv_year= gvkey || fyear;
+gvkeyN=gvkey*1;
+run;
+proc sort data=myCompTable; by gv_year; run;
+
+proc means data=myCompTable Noprint;
+output OUT=count n= /autoname;
+var gvkeyN;
+by gv_year;
+run;
+data dupgvyear2;
+set count (where= (gvkeyN_N>1));
+run;
+
+/*  It just automatically cluster around GV_year so duplicate record will be the one with Freq more than 1 */
+
+/* End of Question 1 */
+
+/* ********************************************************************************************************************************************************* */
+/********************************************************************* Question 2**************************************************************************/
+/*************************************************************************************************************************************************************/
+
+proc sort data=myCompTable out=MyCompTableNoDup nodupkey dupout=dupgvyear; by gvkey fyear;
+run; * To make sure we did not forget to discard duplicates;
+
+/* to Find Firm level sales*/
+proc sort data=MyCompTableNoDup ; by gvkey;
+run;
+
+proc means data=MyCompTableNoDup noprint;
+output out=Firm_agg sum= /autoname;
+var sale;
+by gvkey;
+run;
+/* to Find industry level sales*/
+proc sort data=MyCompTableNoDup ; by SICH;
+run;
+proc means data=MyCompTableNoDup (where= (SICH ne .)) noprint;
+output out=Ind_Agg sum= /autoname;
+var sale;
+by SICH;
+run;
+data Ind_Agg; /* to delete industries with less than 20 firm */
+set Ind_Agg;
+if _FREQ_ >=20;
+run;
+
+/* ********************************************************************************************************************************************************* */
+/* Question 2 using Retain */
+
+proc sort data=myCompTable out=MyCompTableNoDup nodupkey dupout=dupgvyear; by gvkey fyear;
+run; * To make sure we did not forget to discard duplicates;
+
+proc sort data=MyCompTableNoDup ; by gvkey; run;
+
+data Firm_agg;
+set MyCompTableNoDup; *All other variables are for the firms last fiscal year data point if irrelevant should be dropped;
+by  gvkey;
+retain F_agg_sale 0; * zero initializes the variable;
+if first.gvkey then F_agg_sale=0; * 0 for new firm;
+if sale ne . then  F_agg_sale=F_agg_sale+sale;
+else F_agg_sale=F_agg_sale;
+ if last.gvkey then output; * This is very important because if not used then each gvkey is showing up and data will not cluster at firm level;
+run;
+
+proc sort data=MyCompTableNoDup ; by SICH ;
+run;
+
+data Ind_agg;
+set MyCompTableNoDup (Keep= SICH sale) ; * Dropped variables are meaning less in industy level (are for a fim);
+
+by  SICH;
+
+	retain Industy_sales 0;
+	retain Ind_size 0;
+	if first.SICH then 
+		do;
+			Industy_sales=0; *reset value;
+			Ind_size=_N_;  *to be used for checking N>=20 for industry;
+		end;
+	if SICH ne .;
+	if sale ne . then  Industy_sales=Industy_sales+sale;
+	if last.SICH then 
+	do;
+		Ind_size=_N_ - Ind_size;
+		if Ind_size>= 20 then output;
+		drop sale; *Because it is for one firm and is meaning less;
+		
+	end;
+run;
+
+/* End of using Retain */
+
+/* This does not sort because first.gvkey only get 1 once. It does not understand SICH has been changed
+ So you should do it 1 by 1
+1 1
+0 0
+0 1    The first is not 1!!!
+0 0
+1 1
+
+
+
+proc sort data=MyCompTableNoDup ; by SICH gvkey fyear;
+run;
+
+data MyCompTableNoDup;
+set MyCompTableNoDup;
+by SICH gvkey;
+
+retain F_agg_sale 0;
+retain Ind_agg_sale 0;
+
+if first.SICH then Ind_agg_sale=0;
+if first.gvkey then F_agg_sale=0;
+
+if sale ne . then do
+F_agg_sale=F_agg_sale+sale;
+if SICH eq . then Ind_agg_sale=0; 
+	else Ind_agg_sale=Ind_agg_sale+sale;
+end;
+else F_agg_sale=F_agg_sale;
+run; */
+
+/* ********************************************************************************************************************************************************* */
+/*****************************************************************    Question 3  ****************************************************************************/
+/*************************************************************************************************************************************************************/
+
+proc sort data=myCompTable out=MyCompTableNoDup nodupkey dupout=dupgvyear; by gvkey fyear;
+run; * To make sure we did not forget to discard duplicates;
+data temp1;
+set MyCompTableNoDup;
+ind_year = SICH || "_" || fyear;
+run;
+
+proc sort data=temp1 ; by ind_year; run;
+
+data temp2;
+set temp1 ;
+by  ind_year;
+
+	retain Industry_sales 0;
+	retain Ind_size 0;
+	if first.ind_year then 
+		do;
+			Industry_sales=0; *reset value;
+			Ind_size=_N_;  *to be used for checking N>=20 for industry;
+		end;
+	if SICH ne .;
+	if sale ne . then  Industry_sales=Industry_sales+sale;
+	if last.ind_year then 
+	do;
+		Ind_size=_N_ - Ind_size;
+		if Ind_size>= 20 then output;
+		
+	end;
+run;
+
+proc sql;
+create table Herf as
+		select a.*, b.Industry_sales, b.Ind_size
+		from
+			temp1 a, temp2 b
+		where
+			a.ind_year = b.ind_year;
+
+
+quit;
+proc sort data=Herf; by ind_year; run;
+
+data Herf;
+set Herf;
+by ind_year;
+retain Herf 0;
+
+if industry_sales ne 0;
+if first.ind_year then Herf=0;
+if sale ne .  then Herf=Herf+(sale/Industry_sales)**2;
+
+if last.ind_year then 
+	do;
+		Herf=round(Herf,0.01); 
+		keep SICH fyear Herf Ind_size ind_year;
+		output;
+	end;
+run;
+/* ********************************************************************************************************************************************************* */
+/*****************************************************************    Question 4 NOT WORKING  *************************************************************/
+/*************************************************************************************************************************************************************/
+/* NOT WORKING 
+data ratingdata;
+  input @01 id        1.
+        @03 startyr   4.
+        @08 endyr     4.
+	@13 rating    $1.
+	;
+datalines;
+1 2002 2004 A
+1 2005 2007 A
+1 2007 2009 B
+1 2009 2010 A
+2 2002 2004 A
+3 2001 2003 B
+3 2003 2004 B
+3 2005 2007 B
+run;
+data ratingdata;
+	set ratingdata;
+	rating_combined=rating;
+	start_combined=startyr;
+	end_combined=endyr;
+
+run;
+
+proc sort data=ratingdata; by id; run;
+
+data ratingdata;
+set ratingdata;
+retain rating_combined;
+retain start_combined;
+retain end_combined;
+by id;
+if rating_combined ne rating then 
+	do;
+	start_combined=startyr;
+	end_combined=endyr;
+	rating_combined=
+	output;
+	end;
+	else if last.id then output;
+			else carryover;
+
+run;
+/* NOT WORKING 
+
+
