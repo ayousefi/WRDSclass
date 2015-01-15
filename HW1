@@ -129,16 +129,14 @@ by  SICH;
 run;
 
 /* End of using Retain */
-
-/* This does not sort because first.gvkey only get 1 once. It does not understand SICH has been changed
+/* *************************************   NOT WORKING METHOD ********************************************** */
+/* This does not WORK because first.gvkey only get 1 once. It does not understand SICH has been changed
  So you should do it 1 by 1
 1 1
 0 0
 0 1    The first is not 1!!!
 0 0
 1 1
-
-
 
 proc sort data=MyCompTableNoDup ; by SICH gvkey fyear;
 run;
@@ -160,6 +158,7 @@ if SICH eq . then Ind_agg_sale=0;
 end;
 else F_agg_sale=F_agg_sale;
 run; */
+/* *************************************  END OF NOT WORKING ********************************************** */
 
 /* ********************************************************************************************************************************************************* */
 /*****************************************************************    Question 3  ****************************************************************************/
@@ -271,5 +270,5 @@ if rating_combined ne rating then
 
 run;
 /* NOT WORKING 
-
+/* *************************************   END OF NOT WORKING ********************************************** */
 
