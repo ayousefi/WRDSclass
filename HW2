@@ -1,0 +1,257 @@
+ 
+dm log 'clear';
+/************************************************************************Data Downloading************************************************************************/
+
+%let wrds = wrds.wharton.upenn.edu 4016;options comamid = TCP remote=WRDS;
+signon username=_prompt_;
+/* execute code remotely within rsubmit-endrsubmit code block 
+   note that after 15 or so minutes of inactivity, you need to sign on again
+*/
+
+/********************************************************************* for question 1 ***************************************************************************/
+rsubmit;
+libname myfiles '~';
+proc sql; 
+create table myfiles.fundq as
+/* require fyear to be within 1980-2013 */
+
+select gvkey, datadate, fyearq, fqtr, fyr
+	  	from comp.fundq
+  	where 		
+		1980 <= fyearq <= 2013
+	and indfmt='INDL' and datafmt='STD' and popsrc='D' and consol='C'/* prevent double records */ ;
+quit;
+proc download data=myfiles.fundq out=fundq ;run;
+endrsubmit;
+
+
+/************************************************************************ For question 2,3 *************************************************************************/
+rsubmit; 
+libname myfiles '~';
+
+proc sql;
+create table myfiles.funda as
+/* require fyear to be within 2000-2013 */
+
+select gvkey, fyear, datadate, SICH
+	  	from comp.funda 
+  	where 		
+		2000 <= fyear <= 2013
+	and indfmt='INDL' and datafmt='STD' and popsrc='D' and consol='C'/* prevent double records */ ;
+quit;
+
+proc sql;
+create table myfiles.SEG_GEO as
+select *
+	  	from comp.SEG_GEO
+		where 2000 <=year(datadate) <=2013 
+  ;
+quit;
+rsubmit; 
+proc sql;
+create table myfiles.WRDS_SEGMERGED as
+select gvkey, datadate, srcdate, stype, sid, naicsh, NAICSS1, NAICSS2, SICS1, SICS2, SNMS, SOPTP1, INTSEG, sales
+	  	from comp.WRDS_SEGMERGED
+		where 2000 <=year(datadate) <=2013 
+  ;
+quit;
+proc download data=myfiles.WRDS_SEGMERGED out=WRDS_SEGMERGED ;run;
+endrsubmit;
+
+proc download data=myfiles.funda out=funda ;run;
+proc download data=myfiles.SEG_GEO out=SEG_GEO ;run;
+proc download data=myfiles.WRDS_SEGMERGED out=WRDS_SEGMERGED ;run;
+endrsubmit;
+
+/* File WRDS_SEG_GEO is the same as SEG_GEO. However their date variables are named different
+SEG_GEO datadate
+WRDS_SEG_GEO srcdate 
+
+proc sql;
+create table myfiles.WRDS_SEG_GEO as 
+select *
+	  	from comp.WRDS_SEG_GEO 
+		where 2000 <=year(srcdate) <=2013 
+  ;
+quit;
+proc download data=myfiles.WRDS_SEG_GEO out=WRDS_SEG_GEO ;run;
+*/
+/************************************************************************ For question 4 *************************************************************************/
+rsubmit;
+data myTable (keep = gvkey fyear SICH datadate sale at ni prcc_f csho);
+set comp.funda;
+/* require fyear to be within 2000-2013 */
+if 2000 <=fyear <= 2013;
+/* prevent double records */
+if indfmt='INDL' and datafmt='STD' and popsrc='D' and consol='C' ;
+run;
+
+proc sort data=myCompTable out=MyCompTableNoDup nodupkey dupout=dupgvyear; by gvkey fyear;
+run; * To make sure we did not forget to discard duplicates;
+
+proc download data=myTable out=myCompTable;run;
+endrsubmit;
+
+
+
+/******************************************************************End of Data downloading************************************************************************/
+/************************************************************************Question 1************************************************************************/
+
+data fundq;
+set fundq;
+mo=month(datadate);
+run;
+
+proc sort data=fundq; by mo; run;
+
+proc means data=fundq Noprint;
+output OUT=temp n= /autoname;
+var mo;
+by mo;
+run;
+
+proc sql; 
+create table Quarter_end_Freq as 
+	select mo, mo_N,round(100*mo_N/sum(mo_N),0.1) as perc
+		from temp;
+quit;
+
+/************************************************************************Question 2************************************************************************/
+
+proc sql; /* find the firms in funda that have a record in geo file and merge*/
+create table fund_seg_merged as
+
+select s.* from
+	funda  f , seg_geo  s
+	where f.gvkey=s.gvkey and f.datadate=s.datadate;
+	quit;
+
+	proc sql;  /* for each firm and year find the total number of segments in that firm year ( I assumed that we do care that if a firm changes its number 
+	of sectors over time, so instead of picking a special year (first/last year or even using the average number of sector for the firm over time) for each firm
+	I took each firm year as a seperate record as if they are different) */ 
+create table temp as
+select gvkey, datadate, count(*) as numseg from
+	fund_seg_merged
+	group by gvkey, datadate;
+	quit;
+
+proc sql;  /* now count over firm years the frequency of the number of segments */
+create table geo_seg_count as
+
+select numseg  , count(*) as frequency from
+	temp
+	group by numseg;
+	quit;
+
+/************************************************************************Question 3 ************************************************************************/
+/* get back up first time so if you messed with data you donot have to dl it again
+data backup;
+set WRDS_SEGMERGED;
+run;
+*/
+data WRDS_SEGMERGED; /* clean data */
+set WRDS_SEGMERGED;
+/* prevent duplicates: use the data when first published (not later years)*/
+if srcdate eq datadate;
+/* select business segments */
+if stype ="BUSSEG";
+/* keep segments that have SIC industry code */
+if SICS1 ne "";
+/* keep segments with positive sales (to avoid counting inactive segments) */
+if sales > 0;
+run;
+
+proc sql; /*count the number of business segments */
+create table temp as 
+	select gvkey, datadate, SICS1,count(*) as Numseg from
+		WRDS_SEGMERGED
+		group by gvkey, datadate;
+quit;
+
+data temp; /* throw out firms with more than 1 business segment */
+set temp;
+if numseg=1;
+sics=sics1+0; /* sas just doesnot let to use the old variable, so new variable with numerics */
+run;
+
+proc sql; /* merge funda and seg data and flag firms with same SICH and segment SIC */
+create table Flevel_SIC_Incons as
+select seg.*, f.sich, (seg.sics eq f.sich) as flag, year(f.datadate) as year  from
+	temp seg, funda f
+	where 
+	seg.gvkey=f.gvkey and seg.datadate=f.datadate
+	;
+	quit;
+proc means data=Flevel_SIC_Incons Noprint;
+output OUT=Annual_accuracy  mean= /autoname;
+var flag;
+by year;
+run;
+/************************************************************************Question 4 ************************************************************************/
+
+proc sql; /* groups over SICH s (excluding .) and sums sales and number of firms having checks to be more than 20*/
+create table indsales as select
+SICH, sum(sale)as total_sale,  count(*) as N
+from mycomptable
+where 
+	(SICH ne .) 
+group by sich
+having N>=20;
+quit;
+
+/************************************************************************Question 5 ************************************************************************/
+data returns;
+  input @01 id       
+  	@03 date  MMDDYY10.
+        @14 return;
+format date date9.;
+datalines;
+1 10/31/2013 0.01
+1 11/30/2013 0.02
+1 12/31/2013 0.03
+1 01/31/2014 -0.01
+1 02/28/2014 0.01
+2 10/31/2013 -0.01
+2 11/30/2013 0.02
+2 12/31/2013 0.01
+2 01/31/2014 -0.02
+2 02/28/2014 -0.03
+2 03/31/2014 0.02 
+run;
+ 
+data yearly;
+  input @01 id        
+  	@03 date  MMDDYY10.
+        @14 equity;
+format date date9.;
+datalines;
+1 12/31/2011 8
+1 12/31/2012 10
+1 12/31/2013 11
+2 12/31/2012 30
+2 12/31/2013 28
+run;
+
+proc sql; /* It first finds all the annual records that are available before the return date (We get extra matches with older records). 
+Then by grouping over r.id,r.date we are able to control to have records that their matchdate is the latest matching record 
+=> the most recent annual match is turned out */ 
+create table matched as
+select r.*,  y.equity, y.date as matchdate, max(y.date) as lastmatchdate format date9. from
+returns r, yearly y
+where r.id = y.id
+and r.date >= y.date
+group by r.id, r.date
+having matchdate eq lastmatchdate;
+quit;
+/*Question1: What does distinct do? how it would be useful? */
+
+/*Question2: why group only by r.id, r.date does not consolidate over these two (deleting having condition will give multiple records for each combination!).
+Is it because matchdate helps to distinguish records so group by does not work????
+*/
+
+
+/************************************************************************End of Question 5 ************************************************************************/
+
+
+
+
