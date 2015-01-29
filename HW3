@@ -282,18 +282,14 @@ quit;
 
 proc sql;
 create table myfiles.temp as 
-select  a.*, (b.ask - b.bid)as bidaskspread, b.ret as ret
+select  a.*, (b.ask - b.bid)as bidaskspread, (b.ret*1) as ret
 	from myfiles.temp a left join crsp.dsf b
 	on 
 		a.lPERMNO = b.PERMNO
 	    and a.datadate-365 <= b.date <= a.datadate ; 
 quit;
 
-data myfiles.temp;
-set myfiles.temp;
-key = gvkey || fyear;
-run;
-proc download data=myfiles.temp out=temp; run;
+
 proc sort data=myfiles.temp; by key; run;
 proc means data=myfiles.temp noprint;
 output out=myfiles.dsout mean= std= skewness= /autoname;
