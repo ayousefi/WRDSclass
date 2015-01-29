@@ -1,0 +1,308 @@
+/************************************************************************Question 1************************************************************************/
+
+%let wrds = wrds.wharton.upenn.edu 4016;options comamid = TCP remote=WRDS;
+signon username=_prompt_;
+/* execute code remotely within rsubmit-endrsubmit code block 
+   note that after 15 or so minutes of inactivity, you need to sign on again
+*/
+
+rsubmit; 
+libname myfiles '~';
+
+* Download cumpustat data;
+data myfiles.funda;
+	set comp.funda (keep= gvkey fyear datadate SICH CUSIP indfmt  datafmt  popsrc consol) ;
+	if  6799 >= SICH and SICH >=6000;
+	if year(datadate)>=2006 and 2009>=year(datadate);
+	if indfmt='INDL' and datafmt='STD' and popsrc='D' and consol='C';
+
+run;
+
+/* left join keeps all the left obs even when missing right. if 2 right match one left, left join puts both in => if the permno/co changes for a gvkey 
+the left join give both links. Should we then download return data using both links?
+No you donot have to track the changes in links. Just drop the firms with missing values
+ 
+*/
+/* How to find 1 year before? 360 may not be trading day 
+use monthly return file. 
+*/
+
+* find the corresponding permno from linktable;
+proc sql;
+create table myfiles.funda_CRSP as 
+select a.*, b.lpermno, b.lpermco ,b.LINKDT, b.LINKENDDT 
+	from myfiles.funda a  join crsp.CCMXPF_LINKTABLE b
+	on 
+		a.gvkey = b.gvkey
+		and b.lpermno ne . 
+	    and b.linktype in ("LC" "LN" "LU" "LX" "LD" "LS")  /*This two lines avoid duplicates */
+	    and b.linkprim IN ("C", "P")   
+	    and ((a.datadate >= b.LINKDT) or b.LINKDT eq .B) and   /* sometimes start date of link is B and end date is E */
+	       ((a.datadate <= b.LINKENDDT) or b.LINKENDDT eq .E)   ; 
+
+quit;
+* just to make data looks nicer sort it;
+proc sort data=myfiles.funda_CRSP; by gvkey datadate; 
+
+* Download each firms monthly returns USE LOG RETURNS TO MAKE IT SUMABLE;
+proc sql;
+create table myfiles.funda_CRSP as 
+select  a.*, b.DATE, b.HSICCD  as MSFSIC, log(1+b.ret) as logreturn
+	from myfiles.funda_CRSP a left join crsp.msf b
+	on 
+		a.lPERMNO = b.PERMNO
+	    and a.datadate-360 <= b.date <= a.datadate ; /*This helps to get the last 12 months (-360 days most likely catches the 12 months before montly date)
+		Note that these dates are end of month dates */
+quit;
+
+*/ get the index returns USE LOG RETURNS TO MAKE IT SUMABLE;
+proc sql;
+create table myfiles.funda_CRSP as 
+select  a.*, log(1+b.vwretd) as indlogret
+	from myfiles.funda_CRSP a left join crspa.MSIX b
+	on  a.datadate-360 <= b.caldt <= a.datadate ;
+quit;
+
+proc download data=myfiles.funda out=funda ;run;
+proc download data=myfiles.funda_CRSP out=funda_CRSP ;run;
+endrsubmit;
+
+* build a key variable for each firm year ;
+data results; 
+set funda_CRSP;
+spread=log(1+ (exp(logreturn)-exp(indlogret)) ); *I Think this might have a floating point issue, but I donot know how to solve it in SAS;
+key= gvkey || datadate;
+run;
+proc sort data=results; by key; run;
+
+*/ calculate cumulative log returns;
+data results; 
+	set results; 
+	by key;
+		retain cumret 0;
+		retain indcumret 0;
+		retain counter 0; 
+		retain cumspread 0;
+
+		if first.key then 
+			do; 
+				cumret=logreturn;
+				indcumret=indlogret;
+				cumspread=spread;
+				counter=1;
+			end;
+		else 
+			do;
+				cumret=logreturn+cumret;
+				indcumret=indcumret+indlogret;
+				cumspread=spread+cumspread;
+				counter=counter+1;
+			end;
+	run;
+
+	data results;
+		set results (keep= gvkey datadate fyear indfmt CUSIP SICH lpermno cumspread cumret indcumret counter);
+		if counter=12;
+		if cumret ne .;
+		cumret=exp(cumret);
+		indcumret=exp(indcumret);
+		cumspread=exp(cumspread);
+		drop counter;
+	run;
+
+	
+
+/************************************************************************End of Question 1************************************************************************/
+
+/************************************************************************Question 2************************************************************************/
+
+
+
+%macro getfundaMlinkFinancials(dsout=Fundalinked ,stfyear=, endfyear=,  vars=gvkey fyear datadate SICH CUSIP indfmt  datafmt  popsrc consol /*variables to keep*/);
+*This macro downloads the financial firms compustat data and CRSP links between fiscal years stfyear and endfyear
+1. overload vars CAREFULLY! to change the variables to keep in output (do not drop variables used in ifs)
+2. You can change the macro to download specific gvkeys or use another criteria;
+
+%syslput stfyear= &stfyear;
+%syslput endfyear= &endfyear;
+%syslput dsout = &dsout;
+
+%syslput vars = &vars;
+rsubmit; 
+libname myfiles '~';
+* Download cumpustat data;
+data myfiles.temp;
+	set comp.funda (keep= &vars) ;
+	if  6799 >= SICH and SICH >=6000;
+	if year(datadate)>=&stfyear and year(datadate)<= &endfyear;
+	if indfmt='INDL' and datafmt='STD' and popsrc='D' and consol='C';
+run;
+
+/* left join keeps all the left obs even when missing right. if 2 right match one left, left join puts both in => if the permno/co changes for a gvkey 
+the left join give both links. Should we then download return data using both links?
+No you donot have to track the changes in links. Just drop the firms with missing values
+*/
+/* How to find 1 year before? 360 may not be trading day 
+use monthly return file. 
+*/
+
+* find the corresponding permno from linktable;
+proc sql;
+create table myfiles.temp as 
+select a.*, b.lpermno, b.lpermco ,b.LINKDT, b.LINKENDDT 
+	from myfiles.temp a  join crsp.CCMXPF_LINKTABLE b
+	on 
+		a.gvkey = b.gvkey
+		and b.lpermno ne . 
+	    and b.linktype in ("LC" "LN" "LU" "LX" "LD" "LS")  /*This two lines avoid duplicates */
+	    and b.linkprim IN ("C", "P")   
+	    and ((a.datadate >= b.LINKDT) or b.LINKDT eq .B) and   /* sometimes start date of link is B and end date is E */
+	       ((a.datadate <= b.LINKENDDT) or b.LINKENDDT eq .E)   ; 
+quit;
+
+* just to make data looks nicer sort it;
+proc sort data=myfiles.temp; by gvkey datadate; run;
+proc download data=myfiles.temp out=&dsout;run;
+endrsubmit;
+
+ %mend;
+
+%macro getAnnualretunrs(dsin=, dsout= );
+*This macro downloads the annual retunrs and index returns for a firm with a give end of fiscal year date. 12 month previous monthly retunrs are used 
+to calculate returns
+1.The dsin should contain the firm key (permno) and the fiscal date for which returns (annual) are going to be calculated;
+;
+
+/* syslput pushes macro variables to the remote connection */
+%syslput dsin = &dsin;
+%syslput dsout = &dsout;
+
+rsubmit;
+
+libname myfiles '~';
+proc upload data=&dsin out=myfiles.dsin ; run;
+* Download each firms monthly returns USE LOG RETURNS TO MAKE IT SUMABLE;
+proc sql;
+create table myfiles.temp as 
+select  a.*, b.DATE, b.HSICCD  as MSFSIC, log(1+b.ret) as logreturn
+	from myfiles.dsin a left join crsp.msf b
+	on 
+		a.lPERMNO = b.PERMNO
+	    and a.datadate-360 <= b.date <= a.datadate ; /*This helps to get the last 12 months (-360 days most likely catches the 12 months before montly date)
+		Note that these dates are end of month dates */
+quit;
+
+*/ get the index returns USE LOG RETURNS TO MAKE IT SUMABLE;
+proc sql;
+create table myfiles.temp as 
+select  a.*, log(1+b.vwretd) as indlogret
+	from myfiles.temp a left join crspa.MSIX b
+	on  a.datadate-360 <= b.caldt <= a.datadate ;
+quit;
+
+
+* build a key variable for each firm year ;
+data myfiles.temp; 
+set myfiles.temp;
+spread=log(1+ (exp(logreturn)-exp(indlogret)) ); *I Think this might have a floating point issue, but I donot know how to solve it in SAS;
+key= gvkey || datadate;
+run;
+proc sort data=myfiles.temp; by key; run;
+
+*/ calculate cumulative log returns;
+data myfiles.temp; 
+	set myfiles.temp; 
+	by key;
+		retain cumret 0;
+		retain indcumret 0;
+		retain counter 0; 
+		retain cumspread 0;
+
+		if first.key then 
+			do; 
+				cumret=logreturn;
+				indcumret=indlogret;
+				cumspread=spread;
+				counter=1;
+			end;
+		else 
+			do;
+				cumret=logreturn+cumret;
+				indcumret=indcumret+indlogret;
+				cumspread=spread+cumspread;
+				counter=counter+1;
+			end;
+	run;
+
+	data myfiles.temp;
+		set myfiles.temp (keep= gvkey datadate fyear indfmt CUSIP SICH lpermno cumspread cumret indcumret counter);
+		if counter=12;
+		if cumret ne .;
+		cumret=exp(cumret);
+		indcumret=exp(indcumret);
+		cumspread=exp(cumspread);
+		drop counter;
+	run;
+	
+proc download data=myfiles.temp out=&dsout ;run;
+endrsubmit;
+%mend;
+
+%getfundaMlinkFinancials(dsout=Fundalinked ,stfyear=2006, endfyear=2009,  vars=gvkey fyear datadate SICH CUSIP indfmt  datafmt  popsrc consol /*variables to keep*/) ;
+%getAnnualretunrs(dsin=Fundalinked, dsout=AnnualRets);
+
+/************************************************************************End of Question 2************************************************************************/
+
+/************************************************************************ 	Question 3   ************************************************************************/
+
+%macro AppendMarketVars(dsin=AnnualRets, dsout=MarketVarsAppended );
+*This macro assumes that for any input data point we want 1 year (365 day before) market statistics. So input can be getannualretunrs  output 
+which has each observation with a key and fiscal date;
+
+%syslput dsin = &dsin;
+%syslput dsout = &dsout;
+
+rsubmit;
+libname myfiles '~';
+proc upload data=&dsin out=myfiles.temp ; run;
+
+proc sql;
+create table myfiles.temp as 
+select a.*, b.lpermno ,b.LINKDT, b.LINKENDDT 
+	from myfiles.dsin a  left join crsp.CCMXPF_LINKTABLE b
+	on 
+		a.gvkey = b.gvkey
+		and b.lpermno ne . 
+	    and b.linktype in ("LC" "LN" "LU" "LX" "LD" "LS")  /*This two lines avoid duplicates */
+	    and b.linkprim IN ("C", "P")   
+	    and ((a.datadate >= b.LINKDT) or b.LINKDT eq .B) and   /* sometimes start date of link is B and end date is E */
+	       ((a.datadate <= b.LINKENDDT) or b.LINKENDDT eq .E)   ; 
+quit;
+
+
+proc sql;
+create table myfiles.temp as 
+select  a.*, (b.ask - b.bid)as bidaskspread, b.ret as ret
+	from myfiles.temp a left join crsp.dsf b
+	on 
+		a.lPERMNO = b.PERMNO
+	    and a.datadate-365 <= b.date <= a.datadate ; 
+quit;
+
+data myfiles.temp;
+set myfiles.temp;
+key = gvkey || fyear;
+run;
+proc download data=myfiles.temp out=temp; run;
+proc sort data=myfiles.temp; by key; run;
+proc means data=myfiles.temp noprint;
+output out=myfiles.dsout mean= std= skewness= /autoname;
+var bidaskspread ret;
+by key;
+run;
+
+proc download data=myfiles.dsout out=&dsout; run;
+endrsubmit;
+%mend;
+
+%AppendMarketVars(dsin=AnnualRets, dsout=MarketVarsAppended );
