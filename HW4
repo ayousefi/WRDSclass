@@ -1,0 +1,168 @@
+* Include necessary Macros and other flies;
+	dm log 'clear' output;
+	filename mprint 'C:\Users\ayousefi\Desktop\sas_macrocode.txt';
+	options mfile mprint;
+	filename m2 url 'http://www.wrds.us/macros/runquit.sas';
+	%include m2;
+	%include 'C:\Users\ayousefi\Desktop\ClayMacros\DO_OVER.sas';
+	%include 'C:\Users\ayousefi\Desktop\ClayMacros\ARRAY.sas';
+/* Test data construction */
+	/* datalines data are provided by Max Dolinsky */
+data exams;
+input @01 Student_ID    2.
+            @05 Exam1         2.
+            @09   Exam2       2.
+            @13 Exam3         2.
+            ;
+datalines;
+12  68  83  34
+22  77  48  57
+04  99  87  97
+52  14  18  08
+run;
+/* End of Max Dolinsky contribution */
+
+/******************************************** Download data from WRDS for Question 2 ( get funda data and list of variables) **************************************************/
+	rsubmit;endrsubmit;
+	%let wrds = wrds.wharton.upenn.edu 4016;options comamid = TCP remote=WRDS;
+	signon username=_prompt_;
+
+rsubmit;
+/*Use the following code to extract the Funda variables to consider when constructing nonomiss:
+Retrieve variables in Funda */
+	ods listing close; 
+	ods output variables  = varsFunda; 
+	proc datasets lib = comp; contents data=funda; quit;run; 
+	ods output close; 
+	ods listing; 
+
+/* keep relevant variables (excluding firm name, gvkey, fyear, etc)*/
+data varsFunda ;
+	set  varsFunda;
+	if 37 <= Num <= 937;
+run;
+* Get funda data;
+data myfunda ;
+	set comp.funda;
+	/* require fyear to be within 2012-2013 */
+	if 2012 <=fyear <= 2013;
+	/* prevent double records */
+	if indfmt='INDL' and datafmt='STD' and popsrc='D' and consol='C' ;
+run;
+proc download data=myfunda out=Myfunda;run;
+proc download  data=varsFunda out=varsFunda;run;
+endrsubmit;
+/******************************************** End Download data from WRDS for Question 2( get funda data and list of variables) **************************************************/
+/* Question 1
+Write a macro that adds the maximum value as an additional field to a dataset. 
+The variables to consider are passed as an argument. Invoke the macro as %selectMax(dsin=, vars=var1 var2 var3, maxvar=myMax). 
+This macro would add a variable myMax and would set the value to the largest of var1, var2 and var3.
+*/
+
+%macro selectmax( dsin=, vars=, maxvar=mymax);
+	data &dsin;
+	set &dsin;
+	&maxvar= max( of &vars);
+	run;
+%mend selectmax;
+
+%selectmax (dsin=exams, vars= Exam1 Exam2 Exam3, maxvar='exammax');
+
+/* End of Question 1 */
+
+/************************************************************* Question 2 ************************************************************************
+Write a macro that appends the number of non-missing variables (as a proxy for firm complexity) in Compustat Fundamental Annual to a dataset.
+The macro needs to be invoked as %nonMiss(dsin=, dsout=), where you may assume that dsin holds gvkey and fyear, 
+and needs to append a variable nonmiss for each firmyear.
+*/
+
+* This macro received a dataset and name of variables to check if missing. It
+appends the number of corresponding missing variables to the dataset and retunrs dsout;
+%macro nonMiss(dsin= , vars=, dsout=);
+	data &dsout;
+	set &dsin;
+	nonmiss=0;
+		*Note: when using an array you should not use values=. Just use the name of array;
+		%do_over ( &vars, phrase= nonmiss=nonmiss +(? ne . ) ;);
+	run;
+%mend nonMiss;
+*make an array holding list of variables to be checked;
+%array(CheckVariables, data=varsfunda, var=variable);
+*Invoke the makro using an array containing variables to be checked and input/output datasets;
+%nonmiss (dsin=myfunda, vars=CheckVariables, dsout=myfunda);
+/************************************************************* End of Question 2 ************************************************************************/
+/*************************************************************Question 3 ************************************************************************/
+
+rsubmit;endrsubmit;
+	%let wrds = wrds.wharton.upenn.edu 4016;options comamid = TCP remote=WRDS;
+	signon username=_prompt_;
+rsubmit;
+
+data split ;
+	set ibes.adj;
+	if USFIRM eq 1;
+	if 2010 <=year(spdates) <= 2013;
+	if adj ne 1;
+run;
+proc sql;
+create table splitpermno as 
+select a.*, b.permno ,b.date , b.cfacpr
+	from split a  join crsp.DSF b
+	on 
+		a.cusip = b.cusip
+		and b.permno ne . 
+	    and (a.SPDATES = b.date)    ; 
+quit;
+
+proc sql;
+create table splitpermnogv as 
+select a.*, b.gvkey, b.ajex, b.ajp, b.fyear, b.datadate, b.cusip as cusip9  
+	from splitpermno a  join comp.funda b
+	on 
+		a.cusip = substr(b.cusip,1,8)
+	    and (year(a.SPDATES) = year(b.datadate) )    ; 
+
+quit;
+
+ *Seems that a lot of times adjustment factor is different across databases! for nod just use adj from split file;
+
+
+
+proc download data=split out=split;run;
+proc download data=splitpermno out=splitpermno;run;
+proc download data=splitpermnogv out=splitpermnogv;run;
+endrsubmit;
+
+
+* Write a macro that adjusts the unadjusted forecasts, using ADJ, see ADJ, wrds.
+%macro adjuster (dsin=, dsout=);
+
+%syslput dsin = &dsin;
+%syslput dsout = &dsout;
+
+rsubmit;
+proc upload data=&dsin out=inputdata ;run;	
+proc sql;
+create table temp as
+		select a.*, 
+		from inputdata a left join ibes.adj b 
+		on 
+			a.cusip = b.cusip
+			a.fpedats>=b.spdates;
+	quit;
+data temp; 
+	set temp;
+	key = cusip || fpedats || spdate;
+run;
+proc sort data=temp out=temp; by key; run;
+data temp;
+	set temp;
+	if last.key;
+	adjvalue=value*adj;
+run;
+
+proc download data=temp out=&dsout ;run;	
+endrsubmit;
+%mend adjuster;
+
+/*************************************************************End of Question 3 ************************************************************************/
