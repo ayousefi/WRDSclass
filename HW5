@@ -1,0 +1,285 @@
+/****************************************************************************Question 1 ************************************************************/
+dm log 'clear' output;
+%include 'C:\Users\ayousefi\Desktop\ClayMacros\DO_OVER.sas';
+%include 'C:\Users\ayousefi\Desktop\ClayMacros\ARRAY.sas';
+filename mprint 'C:\Users\ayousefi\Desktop\sas_macrocode.txt';
+options mfile mprint;
+	rsubmit; endrsubmit;
+	%let wrds = wrds.wharton.upenn.edu 4016;options comamid = TCP remote=WRDS;
+	signon username=_prompt_;
+
+
+%macro getcompdata(dsout=, startdate=, enddate=, database=fundq, restriction='NaN');
+	%syslput dsout = &dsout;
+	%syslput startdate = &startdate;
+	%syslput enddate = &enddate;
+	%syslput database = &database;
+	%syslput restriction = &restriction;
+	rsubmit;
+
+
+		/*********************** To upload do_over & Array on ****WRDS**** DO NOT FORGET TO DO THIS ********************************/
+		filename m1 url 'http://www.wrds.us/macros/array_functions.sas';
+		%include m1;
+
+		%if &restriction eq 'NaN' %then
+			%do;
+				data temp;
+				set comp.&database;
+				%if &database=fundq %then if &startdate <= fyearq <= &enddate;
+					%else if &startdate <= fyear <= &enddate;
+				if indfmt='INDL' and datafmt='STD' and popsrc='D' and consol='C' ;
+				run;
+			%end;
+			%else
+			%do;
+				data temp;
+				set comp.&database;
+				%if &database=fundq %then if &startdate <= fyearq <= &enddate;
+					%else if &startdate <= fyear <= &enddate;
+				%do_over ( values=&restriction , phrase= if ? ;);
+				if indfmt='INDL' and datafmt='STD' and popsrc='D' and consol='C' ;
+				run;
+			%end;
+
+		proc download data=temp out=&dsout; run; 	
+	endrsubmit;
+%mend ;
+
+%macro appendSICH(dsin=, dsout= );
+
+	%syslput dsin = &dsin;
+	%syslput dsout = &dsout;
+
+
+	rsubmit;
+		proc upload data=&dsin out=inputdata ;run;	
+		proc sql;
+				create table temp as
+				select distinct a.*, b.sich from
+					inputdata a left join comp.funda b
+						on 
+						a.gvkey=b.gvkey and
+						a.fyearq=b.fyear;
+				quit;
+			
+		proc download data=temp out=&dsout; run;
+	endrsubmit;
+%mend ;
+
+%macro getFirmYears(dsout=);
+
+	%getcompdata(dsout=myfundq, startdate=2013, enddate=2013, restriction=  fyr=12);
+	%appendSICH(dsin=myfundq, dsout=myfundqSICH );
+
+	data myfundqSICH;
+		set myfundqSICH (keep= gvkey fyearq fqtr tic cusip saleq sich rdq);
+		if sich ne .;
+		fyear=fyearq;
+		key= fyearq || fqtr || SICH;
+	run;
+
+	proc sort data=myfundqSICH; by key; run;
+
+	proc means data=myfundqSICH noprint;
+		output out=temp n=  Indnumber median=  Indmed / autolabel;
+		var saleq;
+		by key;
+	run;
+
+	proc sql;
+		create table myfundqSICHflaged as
+		select a.*, b.Indnumber, b.Indmed, (a.saleq>b.indmed) as flag from
+			myfundqSICH a left join  temp b 
+			on
+				a.key=b.key
+			having indnumber >=10;
+	quit;
+
+	data &dsout;
+		set myfundqSICHflaged;
+	run;
+
+%mend;
+
+%getfirmyears (dsout=Results);
+/****************************************************************************End of Question 1 ************************************************************/
+/****************************************************************************   Question 2     ************************************************************/
+%macro industryleaders (dsin=, dsout=resultsranked, flaged=1, fyearq1orfyear0=1);
+*This macro needs flags of having sales larger than industry median to rank firms based on their delay in announcement. 
+If not available copy the flagging part from  getFirmYears macro;
+%if &flaged eq 1 %then 
+	%do;
+		data temp;
+			set &dsin;
+			
+			if flag=1; *take only firms with (> median) sales; 
+			%if &fyearq1orfyear0 eq 1 %then key= fyearq || fqtr || SICH; *if dsin has  key variable comment this line;
+				%else key= fyear || fqtr || SICH;
+		run;
+
+		proc means data=temp noprint; *find the first report date in industry-year-quarter;
+			output out=temp min=leaderdate / autolabel;
+			var rdq;
+			by key;
+		run;
+
+		proc sql; *find industry leader and delay in days for other companies that report after their industry leader;
+			create table temp2 as
+			select a.*, (a.rdq-b.leaderdate) as delay, (a.rdq eq b.leaderdate) as Indleader from
+			results &dsin left join temp b on
+				a.key=b.key;
+		quit;
+
+		proc rank data= temp2 out=temp2 groups=10; * rank companies in deciles based on their delay in reporting on each quarter;
+			var delay;
+			ranks delayrank;
+			by key;
+		run;
+	%end;
+	%else
+		%do;
+
+
+			data myfundqSICH;
+				set &dsin;
+				if sich ne .;
+				%if &fyearq1orfyear0 eq 1 %then key= fyearq || fqtr || SICH; *if dsin has  key variable comment this line;
+					%else key= fyear || fqtr || SICH;
+			run;
+
+			proc sort data=myfundqSICH; by key; run;
+
+			proc means data=myfundqSICH noprint;
+				output out=temp n=  Indnumber median=  Indmed / autolabel;
+				var saleq;
+				by key;
+			run;
+
+			proc sql;
+				create table myfundqSICHflaged as
+				select a.*, b.Indnumber, b.Indmed, (a.saleq>b.indmed) as flag from
+					myfundqSICH a left join  temp b 
+					on
+						a.key=b.key
+					having indnumber >=10;
+			quit;
+
+			data temp;
+				set myfundqSICHflaged;
+				if flag=1; *take only firms with (> median) sales; 
+				key= fyearq || fqtr || SICH; *if dsin has  key variable comment this line;
+			run;
+
+			proc means data=temp noprint; *find the first report date in industry-year-quarter;
+				output out=temp min=leaderdate / autolabel;
+				var rdq;
+				by key;
+			run;
+
+			proc sql; *find industry leader and delay in days for other companies that report after their industry leader;
+				create table temp2 as
+				select a.*, (a.rdq-b.leaderdate) as delay, (a.rdq eq b.leaderdate) as Indleader from
+				results &dsin left join temp b on
+					a.key=b.key;
+			quit;
+
+			proc rank data= temp2 out=temp2 groups=10; * rank companies in deciles based on their delay in reporting on each quarter;
+				var delay;
+				ranks delayrank;
+				by key;
+			run;
+		%end;
+
+data &dsout;
+	set temp2;
+	delayrank=delayrank+1; *groups are from 0-9 => 1-10;
+run;
+%mend;
+
+%industryleaders (dsin=results, dsout=resultsranked);
+/****************************************************************************End of Question 2 ************************************************************/
+/****************************************************************************   Question 3     ************************************************************/
+dm log 'clear' output;
+
+libname comp 'S:\Compustat';
+libname crsp 'S:\Compustat\CRSP';
+libname ibes 'S:\Compustat\IBES';
+
+%include 'C:\Users\ayousefi\Desktop\ClayMacros\macro_1_getfunda.sas';
+%include 'C:\Users\ayousefi\Desktop\ClayMacros\macro_2_earn_ann_date.sas';
+%include 'C:\Users\ayousefi\Desktop\ClayMacros\macro_3_beta.sas';
+%include 'C:\Users\ayousefi\Desktop\ClayMacros\macro_4_unexpected_earnings.sas';
+%include 'C:\Users\ayousefi\Desktop\ClayMacros\macro_5_event_return.sas';
+%include 'C:\Users\ayousefi\Desktop\ClayMacros\macro_winsor.sas';
+/*  Regression Macro that gets a data set and a model and runs a regression on it
+	dsin : input variable
+	DepVar: Dependent variable
+	regformula: list of independent variables e.g. unex_p loss loss_unex_p delayrank
+	method: Regression method:  reg      : proc reg 
+							    surveyreg: proc surveyreg (default)
+	ResultLoc: library name and prefix of the results datasets 
+				Default: Library: work library
+						 Prefix : reg1
+
+*/
+%macro doreg(dsin=, DepVar=, regformula= , method=surveyreg,ResultLoc=work.reg1);
+%if &method eq surveyreg %then
+	%do;
+		proc surveyreg data=&dsin;   
+		   	model  &DepVar = &regformula;  
+			ods output 	ParameterEstimates  = &ResultLoc._params 
+			            FitStatistics 		= &ResultLoc._fit
+						DataSummary 		= &ResultLoc._summ;
+		quit;
+	%end;
+		%else
+			%do;
+				proc reg data=&dsin;   
+			  		model  &DepVar = &regformula;  
+				quit;
+			%end;
+
+%mend;
+
+/* create dataset */
+
+/* use funda as starting point */
+*                       nt income, ast total, sale, common eq., common sh. outstnd.,  price close;
+%getFunda(dsout=a_funda, vars=ni at sale ceq csho prcc_f , laggedvars=at sale csho prcc_f, year1=2012, year2=2013);
+
+/* get earnings announcement date */
+%earn_ann_date(dsin=a_funda, dsout=b_earn_ann, varname=ann_dt, source=IBES);
+%earn_ann_date(dsin=b_earn_ann, dsout=b_earn_ann2, varname=ann_dt_fundq, source=fundq);
+
+/* get earnings surprise */
+%unex_earn(dsin=b_earn_ann2, dsout=c_unex);
+
+/* get beta */
+%getBeta(dsin=c_unex, dsout=d_beta, nMonths=30, minMonths=12, estDate=ann_dt);
+
+/* get event stock return */
+%eventReturn(dsin=d_beta, dsout=e_ret, eventdate=ann_dt, start=-1, end=2, varname=abnret);
+%eventReturn(dsin=e_ret, dsout=e_ret2, eventdate=ann_dt, start=0, end=1, varname=abnret2);
+
+/* some variable construction */
+data f_sample;
+set e_ret2;
+unex_p = unex / prcc_f;
+loss = (ni < 0);
+loss_unex_p = loss * unex_p;
+run;
+
+/* winsorize */
+%let myVars = loss loss_unex_p unex_p abnret abnret2;
+%winsor(dsetin=f_sample,  byvar=fyear, dsetout=f_sample_wins, vars=&myVars , type=winsor, pctl=1 99);
+
+/* Fin industry leaders and delayrank deciles */
+%industryleaders (dsin=f_sample_wins, dsout=f_sample_wins, FLAGED=0, fyearq1orfyear0=0);
+/* do regression */
+%doreg(dsin=f_sample_wins, DepVar=abnret, regformula= unex_p loss loss_unex_p delayrank, method=surveyreg,ResultLoc=work.reg1);
+
+
+/****************************************************************************   End of Question 3     ********************************************************/
+
+
