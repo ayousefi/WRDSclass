@@ -1,0 +1,225 @@
+%macro doreg(dsin=, DepVar=, regformula= , method=surveyreg,ResultLoc=work.reg1);
+%if &method eq surveyreg %then
+	%do;
+		proc surveyreg data=&dsin;   
+		   	model  &DepVar = &regformula;  
+			ods output 	ParameterEstimates  = &ResultLoc._params 
+			            FitStatistics 		= &ResultLoc._fit
+						DataSummary 		= &ResultLoc._summ;
+		quit;
+	%end;
+		%else
+			%do;
+				proc reg data=&dsin;   
+			  		model  &DepVar = &regformula;  
+				quit;
+			%end;
+
+%mend;
+dm log 'clear' output;
+libname database 'C:\Users\ayousefi\Desktop\Database';
+libname comp 'S:\Compustat';
+libname crsp 'S:\Compustat\CRSP';
+libname ibes 'S:\Compustat\IBES';
+%include 'C:\Users\ayousefi\Desktop\ClayMacros\macro_1_getfunda.sas';
+
+/* WRDS SEC Analytics Suite: wcilink_gvkey table, provides gvkey => cik link 
+http://wrds-web.wharton.upenn.edu/wrds/tools/variable.cfm?library_id=124
+*/
+rsubmit;endrsubmit;
+%let wrds = wrds.wharton.upenn.edu 4016;options comamid = TCP remote=WRDS;
+signon username=_prompt_;
+rsubmit;
+libname secsuite "/wrds/sec/sasdata";
+proc download data=secsuite.wciklink_gvkey out=wciklink_gvkey; run; 
+endrsubmit;
+
+* Get funda data;
+%getFunda(dsout=myfunda, vars=gvkey cik cik_num fyear,laggedvars=, year1=2013, year2=2013);
+/******************************************************************* Question 1***************************************************************************/
+%macro appent8kfilings(dsout=,dsin=,wcikling_gvkey=);
+* Get WRDS ciks as cik2 in case there is no match with funda ciks;
+	proc sql;
+		create table myfundacikh as
+		select a.*, b.cik as cik2 
+		from &dsin a left join &wrds_cikgvkey_link b 
+		on 
+		a.gvkey=b.gvkey and
+		( (a.fyear >= year(b.datadate1)) or (missing(b.datadate1) eq 1) ) and  /*some firms have missing datadate in linktable I treat it as the cik is permanent*/
+		( (a.fyear <= year(b.datadate2)) or (missing(b.datadate2) eq 1) )
+		;
+	quit;
+	*Some companies have two records in the link file within the same date range for now get rid of the duplicates ( can use both keys later!!!);
+	proc sort data=myfundacikh nodupkey; by key cik;
+	run;
+	data myfundacikh;
+		set myfundacikh;
+		*SAS is lame! does not let to convert in the same column;
+		ciknumeric=1*cik;
+		cik2numeric=1*cik2;
+	run;
+
+	proc sql;
+		create table &dsout as 
+		select distinct a.*, b.formtype, count(b.formtype) as numfilings
+		from myfundacikh a left join &SECfilings b
+		on year(b.date) eq a.fyear and 
+		(a.ciknumeric eq b.cik or a.cik2numeric eq b.cik) and
+		b.formtype eq '8-K'
+		group by a.key, a.cik;
+	quit;
+
+%mend;
+%appent8kfilings(dsout=fundaSEC,dsin=myfunda,SECfilings=database.filings,wrds_cikgvkey_link=wcikling_gvkey);
+
+/******************************************************************* Question 2***************************************************************************/
+/*The absorb keyword in proc glm subtracts the mean for both dependent and independent variables for each group. 
+This is equivalent to including a dummy variable for each group. Create a sample dataset and verify that this is indeed the case. 
+I.e., demean the variables with proc standard (by group) (i.e., compute for each firm the average value for the dependent variable, 
+and all independent variables, and then subtract this firm-specific mean from these variables), followed by an OLS regression with proc reg. 
+Compare the coefficients with fixed effects regression using proc glm
+*/
+/* Using absorb does not work with multiple variables  because: "Several variables can be specified, in which case each one is assumed to be nested in the preceding
+variable in the ABSORB statement." 
+also
+NOTE: Predicted values not available when absorption is used.
+So make a fake group id variable which is always 1
+*/
+data classfit (keep= groupid sexnum age height weight);
+set sashelp.classfit;
+sexnum=(sex eq 'M');
+groupid=1;
+run;
+
+proc standard data=classfit mean=0 out=temp; run;
+%doreg(dsin=temp, DepVar=weight, regformula= age height sexnum , method=reg);
+
+/*only age can be used with absorb as discussed above */
+proc sort data=classfit; by   groupid;run;
+proc glm  
+
+data=classfit;
+absorb  groupid;
+model weight= age height sexnum;
+
+run;
+
+/******************************************************************* Question 3***************************************************************************/
+%getFunda(dsout=myfunda3, vars=conm gvkey fyear ni wcap at bkvlps csho prcc_f,laggedvars=, year1=2013, year2=2013);
+data myfunda3;
+set myfunda3;
+loss=(ni <0);
+if csho ne '.' and bkvlps ne '.' and prcc_f ne '.' and wcap ne '.' and at ne '.'; 
+bookvalue=csho*bkvlps; *negative book value is ok (however -bv and positive mv is problematic as higher m/b ratio meaning gets reversed);
+marketvalue=abs(csho*prcc_f); *crsp put a - when a price is not available on that date, so get the abs incase this is the case here;
+mb=(abs(marketvalue/bookvalue)+marketvalue/bookvalue)/2; *make all negative numbers zero because of 2 lines before reason;
+WCperassets=wcap/at;
+mykey= gvkey || fyear;
+run;
+proc sql; 
+create table myfunda3_temp as
+select distinct a.*, count(b.fyear) as firmage from
+myfunda3 a left join comp.funda b
+on a.gvkey eq b.gvkey and
+a.fyear >= b.fyear and b.fyear>=1970 /* 1970 just to make it run faster */
+group by mykey;
+quit;
+
+
+proc logistic data=myfunda3_temp;
+model loss= mb WCperassets firmage;
+output out = output PREDICTED=predicted ;
+		run;
+		proc sql;
+create table lfirmsmatched as 
+select a.*, b.gvkey as matchgvkey, b.conm as matchname,
+		b.mb as matchmb, b.WCperassets as matchWCperassets, b.firmage as matchfirmage, 
+		abs(b.predicted-a.predicted) as spread
+	from output a, output b												
+			where
+			a.fyear eq b.fyear
+			and substr(a.conm,1,1) in ('A','B','C','D','E','F','G','H','I','J','K','L')
+			and (substr(b.conm,1,1) not in ('A','B','C','D','E','F','G','H','I','J','K','L')) 
+			and b.predicted-a.predicted<=0.01 /* You should have something like this to speed up otherwise the temporary table will explode*/
+			group by a.key
+			having calculated spread eq min( calculated spread) /* CALCULATED enables you to use the results of an expression in the same SELECT clause or in the WHERE clause. 
+												It is valid only when used to refer to columns that are calculated in the immediate query expression.*/
+			;
+			quit;
+
+proc sort data=lfirmsmatched; by fyear;run;
+proc means data=lfirmsmatched noprint;
+output out=matchsummary mean= median=/autoname autolabel;
+var predicted mb WCperassets firmage;
+by fyear;
+run;
+data output;
+set output;
+if substr(conm,1,1) in ('A','B','C','D','E','F','G','H','I','J','K','L') then
+	AL=1; else AL=0;
+proc sort data=output; by fyear AL;run;
+
+proc means data=output noprint;
+output out=separatesummary mean= median=/autoname autolabel;
+var predicted mb WCperassets firmage;
+by fyear AL;
+run;
+
+
+/******************************************************************* Question 4***************************************************************************/
+
+ 
+proc sql;
+create table LfirmsMatchedUnique as 
+select a.*, b.gvkey as matchgvkey, b.conm as matchname, abs(b.predicted-a.predicted) as spread, count(a.key) as priority,
+	b.mb as matchmb, b.WCperassets as matchWCperassets, b.firmage as matchfirmage 
+	from output a, output b												
+			where
+			a.fyear eq b.fyear
+			and substr(a.conm,1,1) in ('A','B','C','D','E','F','G','H','I','J','K','L')
+			and (substr(b.conm,1,1) not in ('A','B','C','D','E','F','G','H','I','J','K','L')) 
+			and b.predicted-a.predicted<=0.005 /* You should have something like this to speed up otherwise the temporary table will explode*/
+			group by a.gvkey
+			;
+			quit;
+/*sort records by matched MZ firms based on the priority (AL firms with fewer MZ matches are in priority */
+proc sort data=LfirmsMatchedUnique ; by  matchgvkey priority spread; run;
+proc sort data=LfirmsMatchedUnique nodupkey; by  matchgvkey priority spread; run;
+ * The rest is similar to question 3;
+
+
+
+/******************************************************************* End of Question 4***************************************************************************/
+
+
+
+
+
+/*
+			* This did not work because calculated only works within where and select
+			* Also left join needs an on immediatedly
+			*Then where would be out of order 
+			* calculated also need to have its reference in the immedate select so you cannot have an inner select in between
+proc sql;
+create table lfirmsmatched as 
+select a.*, b.gvkey as matchgvkey,abs(b.predicted-a.predicted) as spread 
+	
+	from lfirms a left join 
+			(select conm, predicted, gvkey from output 
+												where (substr(conm,1,1) not in ('A','B','C','D','E','F','G','H','I','J','K','L'))) b 
+			where
+			calculatede spread eq min(calculated spread)
+			on
+			b.predicted-a.predicted<=0.01  CALCULATED enables you to use the results of an expression in the same SELECT clause or in the WHERE clause. 
+												It is valid only when used to refer to columns that are calculated in the immediate query expression.
+
+			;
+			quit;
+*/
+
+
+			
+
+
+
+
